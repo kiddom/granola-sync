@@ -75,7 +75,7 @@ launchctl load "$PLIST_PATH"
 # --- First run ---
 echo ""
 echo "Running first sync..."
-python3 "$INSTALL_DIR/sync-granola.py"
+GRANOLA_ARCHIVE_DIR="$ARCHIVE_DIR" python3 "$INSTALL_DIR/sync-granola.py"
 
 echo ""
 echo "All done. Granola notes will archive to:"
