@@ -1,12 +1,12 @@
 # granola-sync
 
-Archives Granola meeting notes and transcripts to Google Drive nightly. Includes a Claude Code skill for manual runs and backfills.
+Archives Granola meeting notes and transcripts nightly. Saves to a local folder or Google Drive. Includes a Claude Code skill for manual runs and backfills.
 
 ## What it does
 
 - Reads from the local Granola cache (`~/Library/Application Support/Granola/cache-v*.json`)
 - Converts notes (Prosemirror JSON) and transcripts to markdown
-- Writes one folder per day to Google Drive: `Granola Notes/YYYY-MM-DD/`
+- Writes one folder per day: `Granola Notes/YYYY-MM-DD/`
 - Auto-detects the current Granola cache version — no manual updates needed when Granola upgrades
 
 ## Requirements
@@ -14,23 +14,25 @@ Archives Granola meeting notes and transcripts to Google Drive nightly. Includes
 - macOS
 - [Granola](https://granola.so) installed and signed in
 - Python 3
-- Google Drive for Desktop mounted at `~/Library/CloudStorage/GoogleDrive-YOUR_EMAIL/`
+- Google Drive for Desktop (optional — notes can also be saved locally)
 
 ## Setup
 
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/YOUR_ORG/granola-sync.git ~/granola-sync
+git clone https://github.com/kiddom/granola-sync.git ~/granola-sync
 ```
 
-### 2. Update the archive destination
+### 2. Set the archive destination (optional)
 
-Open `sync-granola.py` and update `ARCHIVE_DIR` to your own Google Drive path:
+By default, notes are saved to `~/Documents/Granola Notes`. To use Google Drive instead, set the `GRANOLA_ARCHIVE_DIR` environment variable:
 
-```python
-ARCHIVE_DIR = Path("/Users/YOUR_USERNAME/Library/CloudStorage/GoogleDrive-YOUR_EMAIL@kiddom.co/My Drive/Granola Notes")
+```bash
+export GRANOLA_ARCHIVE_DIR="$HOME/Library/CloudStorage/GoogleDrive-you@example.com/My Drive/Granola Notes"
 ```
+
+Or run `install.sh` which handles this automatically.
 
 ### 3. Make the shell script executable
 

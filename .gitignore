@@ -1,0 +1,4 @@
+granola-sync.log
+.env
+*.pyc
+__pycache__/

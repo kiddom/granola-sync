@@ -18,7 +18,10 @@ def _find_cache_file():
     return candidates[-1]
 
 CACHE_FILE = _find_cache_file()
-ARCHIVE_DIR = Path("/Users/stephaniebutler/Library/CloudStorage/GoogleDrive-sbutler@kiddom.co/My Drive/Granola Notes")
+ARCHIVE_DIR = Path(os.environ.get(
+    "GRANOLA_ARCHIVE_DIR",
+    str(Path.home() / "Documents/Granola Notes"),
+))
 LOOKBACK_DAYS = 2
 
 

@@ -9,7 +9,7 @@ echo "Granola Sync Setup"
 echo "------------------"
 
 # --- Email ---
-read -rp "What's your Kiddom Google email? (e.g. you@kiddom.co): " USER_EMAIL
+read -rp "What's your Google email? (e.g. you@example.com): " USER_EMAIL
 if [[ -z "$USER_EMAIL" ]]; then
   echo "Email is required. Exiting."
   exit 1
@@ -38,9 +38,10 @@ curl -fsSL "$REPO/sync-granola.py" -o "$INSTALL_DIR/sync-granola.py"
 curl -fsSL "$REPO/sync-granola.sh" -o "$INSTALL_DIR/sync-granola.sh"
 chmod +x "$INSTALL_DIR/sync-granola.sh"
 
-# Patch ARCHIVE_DIR in the script
-ESCAPED=$(printf '%s\n' "$ARCHIVE_DIR" | sed 's/[\/&]/\\&/g')
-sed -i '' "s|ARCHIVE_DIR = Path(\"[^\"]*\")|ARCHIVE_DIR = Path(\"$ESCAPED\")|" "$INSTALL_DIR/sync-granola.py"
+# Set GRANOLA_ARCHIVE_DIR in the shell wrapper
+sed -i '' "1a\\
+export GRANOLA_ARCHIVE_DIR=\"$ARCHIVE_DIR\"
+" "$INSTALL_DIR/sync-granola.sh"
 
 # --- launchd ---
 PLIST_LABEL="com.$(whoami).granola-sync"
