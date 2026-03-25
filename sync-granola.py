@@ -19,38 +19,11 @@ from pathlib import Path
 ARCHIVE_DIR = Path("/Users/stephaniebutler/Library/CloudStorage/GoogleDrive-sbutler@kiddom.co/My Drive/Granola Notes")
 LOOKBACK_DAYS = 2
 
-def _load_config():
-    config_path = Path.home() / ".claude/scripts/granola-sync-config.json"
-    try:
-        return json.loads(config_path.read_text())
-    except Exception:
-        return {}
 
-_config = _load_config()
-SLACK_BOT_TOKEN = _config.get("slack_bot_token", "")
-SLACK_USER_ID = _config.get("slack_user_id", "")
-
-
-# --- Slack alerting ---
 
 def slack_alert(message):
-    """Send a DM to Stephanie via Slack. Best-effort — never raises."""
-    try:
-        data = json.dumps({"channel": SLACK_USER_ID, "text": message}).encode()
-        req = urllib.request.Request(
-            "https://slack.com/api/chat.postMessage",
-            data=data,
-            headers={
-                "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
-                "Content-Type": "application/json",
-            },
-        )
-        resp = urllib.request.urlopen(req, timeout=10)
-        result = json.loads(resp.read())
-        if not result.get("ok"):
-            print(f"  [warn] Slack alert failed: {result.get('error')}")
-    except Exception as e:
-        print(f"  [warn] Slack alert error: {e}")
+    """Placeholder — Slack alerting not yet configured."""
+    pass
 
 
 # --- Granola cache ---
