@@ -4,10 +4,10 @@ Archives Granola meeting notes and transcripts nightly. Saves to a local folder 
 
 ## What it does
 
-- Reads from the local Granola cache (`~/Library/Application Support/Granola/cache-v*.json`)
-- Converts notes (Prosemirror JSON) and transcripts to markdown
+- Reads meetings from the Granola API (`get-documents`, `get-document-panels`, `get-document-transcript`)
+- Token is loaded from Granola's local auth file and auto-refreshed when expired — no manual re-authentication needed
+- Converts notes (Prosemirror JSON or AI panels) and transcripts to markdown
 - Writes one folder per day: `Granola Notes/YYYY-MM-DD/`
-- Auto-detects the current Granola cache version — no manual updates needed when Granola upgrades
 
 ## Requirements
 

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
 Nightly Granola archive script.
-Reads from local Granola cache and falls back to Granola API for recent meetings
-whose notes are not yet stored locally. Sends a Slack DM on failure.
+Reads meeting data from the Granola API. Token auto-refreshed when expired.
 """
 
 import gzip
 import html
 import json
+import os
 import re
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone, timedelta
@@ -16,9 +17,14 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 # --- Config ---
-ARCHIVE_DIR = Path("/Users/stephaniebutler/Library/CloudStorage/GoogleDrive-sbutler@kiddom.co/My Drive/Granola Notes")
+_default_archive = Path.home() / "Documents" / "Granola Notes"
+ARCHIVE_DIR = Path(os.environ.get("GRANOLA_ARCHIVE_DIR", str(_default_archive)))
 LOOKBACK_DAYS = 2
-
+ACCOUNTS_FILE = Path.home() / "Library/Application Support/Granola/stored-accounts.json"
+TOKEN_CACHE_FILE = Path.home() / ".granola-sync-token.json"
+WORKOS_CLIENT_ID = "client_01JZJ0XBDAT8PHJWQY09Y0VD61"
+WORKOS_AUTH_URL = "https://auth.granola.ai/user_management/authenticate"
+API_BASE = "https://api.granola.ai/v1"
 
 
 def slack_alert(message):
@@ -26,51 +32,105 @@ def slack_alert(message):
     pass
 
 
-# --- Granola cache ---
+# --- Token management ---
 
-def _find_cache_file():
-    granola_dir = Path.home() / "Library/Application Support/Granola"
-    candidates = sorted(granola_dir.glob("cache-v*.json"), key=lambda p: int(re.search(r"v(\d+)", p.name).group(1)))
-    if not candidates:
-        raise FileNotFoundError(f"No cache-v*.json found in {granola_dir}")
-    return candidates[-1]
-
-
-CACHE_FILE = _find_cache_file()
-
-
-# --- Granola API ---
-
-def _load_api_token():
-    import time
-    sup_path = Path.home() / "Library/Application Support/Granola/supabase.json"
+def _read_accounts_tokens():
+    """Return (access_token, refresh_token, obtained_at_ms) from stored-accounts.json."""
     try:
-        sup = json.loads(sup_path.read_text())
-        workos = json.loads(sup["workos_tokens"])
-        token = workos["access_token"]
-        obtained_at_ms = workos.get("obtained_at", 0)
-        expires_in = workos.get("expires_in", 0)
-        expires_at_ms = obtained_at_ms + expires_in * 1000
-        if time.time() * 1000 > expires_at_ms:
-            return None, "Granola API token is expired — open Granola to refresh it"
-        return token, None
-    except Exception as e:
-        return None, f"Could not load Granola API token: {e}"
+        raw = json.loads(ACCOUNTS_FILE.read_text())
+        accounts = json.loads(raw["accounts"])
+        if not accounts:
+            return None, None, 0
+        tokens = json.loads(accounts[0]["tokens"])
+        return tokens.get("access_token"), tokens.get("refresh_token"), tokens.get("obtained_at", 0)
+    except Exception:
+        return None, None, 0
 
 
-API_TOKEN, API_TOKEN_ERROR = _load_api_token()
+def _read_cache_tokens():
+    """Return (access_token, refresh_token, obtained_at_ms) from local token cache."""
+    try:
+        if TOKEN_CACHE_FILE.exists():
+            data = json.loads(TOKEN_CACHE_FILE.read_text())
+            return data.get("access_token"), data.get("refresh_token"), data.get("obtained_at", 0)
+    except Exception:
+        pass
+    return None, None, 0
 
 
-def call_api(endpoint, payload):
-    """POST to Granola API, return parsed JSON or None on failure."""
-    if not API_TOKEN:
-        return None
-    data = json.dumps(payload).encode()
+def _save_token_cache(access_token, refresh_token):
+    try:
+        TOKEN_CACHE_FILE.write_text(json.dumps({
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "obtained_at": int(time.time() * 1000),
+        }))
+    except Exception:
+        pass
+
+
+def _is_expired(obtained_at_ms, expires_in_s=21599, buffer_s=300):
+    """True if token expires within buffer_s seconds."""
+    return time.time() * 1000 > obtained_at_ms + (expires_in_s - buffer_s) * 1000
+
+
+def _do_refresh(refresh_token):
+    """Call WorkOS refresh endpoint. Returns (access_token, refresh_token) or (None, None)."""
+    payload = {
+        "grant_type": "refresh_token",
+        "client_id": WORKOS_CLIENT_ID,
+        "refresh_token": refresh_token,
+    }
     req = urllib.request.Request(
-        f"https://api.granola.ai/v1/{endpoint}",
-        data=data,
+        WORKOS_AUTH_URL,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=15)
+        result = json.loads(resp.read())
+        return result.get("access_token"), result.get("refresh_token")
+    except Exception as e:
+        print(f"  [warn] Token refresh failed: {e}")
+        return None, None
+
+
+def load_api_token():
+    """
+    Return (token, error_string). Strategy:
+    1. Local cache — if fresh, use it.
+    2. stored-accounts.json — if fresh, use it.
+    3. Either source has a refresh_token — try to refresh.
+    """
+    c_tok, c_ref, c_at = _read_cache_tokens()
+    if c_tok and c_at and not _is_expired(c_at):
+        return c_tok, None
+
+    a_tok, a_ref, a_at = _read_accounts_tokens()
+    if a_tok and a_at and not _is_expired(a_at):
+        return a_tok, None
+
+    refresh = a_ref or c_ref
+    if refresh:
+        new_tok, new_ref = _do_refresh(refresh)
+        if new_tok:
+            _save_token_cache(new_tok, new_ref or refresh)
+            return new_tok, None
+        return None, "Granola API token is expired and refresh failed — open Granola to re-authenticate"
+
+    return None, "Could not load Granola API token — open Granola to authenticate"
+
+
+# --- API ---
+
+def call_api(endpoint, payload, token):
+    if not token:
+        return None
+    req = urllib.request.Request(
+        f"{API_BASE}/{endpoint}",
+        data=json.dumps(payload).encode(),
         headers={
-            "Authorization": f"Bearer {API_TOKEN}",
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "Accept-Encoding": "gzip",
         },
@@ -82,11 +142,11 @@ def call_api(endpoint, payload):
             raw = gzip.decompress(raw)
         return json.loads(raw)
     except Exception as e:
-        print(f"  [warn] API call {endpoint} failed: {e}")
+        print(f"  [warn] API {endpoint} failed: {e}")
         return None
 
 
-# --- HTML/Prosemirror helpers ---
+# --- Formatting helpers ---
 
 class _HTMLToMarkdown(HTMLParser):
     def __init__(self):
@@ -94,7 +154,6 @@ class _HTMLToMarkdown(HTMLParser):
         self.lines = []
         self._current = []
         self._list_depth = 0
-        self._in_li = False
 
     def _flush(self):
         text = "".join(self._current).strip()
@@ -105,7 +164,6 @@ class _HTMLToMarkdown(HTMLParser):
         if tag in ("h1", "h2", "h3", "h4"):
             self._flush()
         elif tag == "li":
-            self._in_li = True
             self._current = []
         elif tag == "ul":
             self._list_depth += 1
@@ -114,16 +172,13 @@ class _HTMLToMarkdown(HTMLParser):
 
     def handle_endtag(self, tag):
         if tag in ("h1", "h2", "h3", "h4"):
-            level = int(tag[1])
             text = self._flush()
             if text:
-                self.lines.append(f"{'#' * level} {text}")
+                self.lines.append(f"{'#' * int(tag[1])} {text}")
         elif tag == "li":
             text = self._flush()
             if text:
-                indent = "  " * (self._list_depth - 1)
-                self.lines.append(f"{indent}- {text}")
-            self._in_li = False
+                self.lines.append("  " * (self._list_depth - 1) + f"- {text}")
         elif tag == "ul":
             self._list_depth = max(0, self._list_depth - 1)
         elif tag == "p":
@@ -177,10 +232,10 @@ def prosemirror_to_markdown(node, depth=0):
         return "\n".join(prosemirror_to_markdown(c, depth) for c in children).strip()
     elif node_type == "heading":
         level = node.get("attrs", {}).get("level", 3)
-        text = "".join(prosemirror_to_markdown(c, depth) for c in children)
+        text = "".join(prosemirror_to_markdown(c) for c in children)
         return f"{'#' * level} {text}"
     elif node_type == "paragraph":
-        text = "".join(prosemirror_to_markdown(c, depth) for c in children)
+        text = "".join(prosemirror_to_markdown(c) for c in children)
         return text if text.strip() else ""
     elif node_type == "bulletList":
         return "\n".join(prosemirror_to_markdown(c, depth) for c in children)
@@ -205,10 +260,7 @@ def has_text_content(node):
         return False
     if node.get("type") == "text" and node.get("text", "").strip():
         return True
-    for child in (node.get("content") or []):
-        if has_text_content(child):
-            return True
-    return False
+    return any(has_text_content(c) for c in (node.get("content") or []))
 
 
 def format_transcript(segments):
@@ -221,14 +273,15 @@ def format_transcript(segments):
         text = seg.get("text", "").strip()
         if not text:
             continue
-        source = seg.get("source", "")
         ts = seg.get("start_timestamp", "")
         time_label = ""
         if ts:
             dt = parse_date(ts)
             if dt:
                 time_label = dt.strftime("%H:%M:%S") + " "
-        speaker = "System" if source == "system" else "Microphone"
+        speaker = seg.get("detected_speaker_name") or (
+            "System" if seg.get("source") == "system" else "Microphone"
+        )
         lines.append(f"**[{time_label}{speaker}]** {text}")
     return "\n\n".join(lines) if lines else "_No transcript available._"
 
@@ -240,45 +293,57 @@ def main():
     cutoff_date = today - timedelta(days=LOOKBACK_DAYS)
     warnings = []
 
-    if API_TOKEN_ERROR:
-        print(f"  [warn] {API_TOKEN_ERROR}")
-        warnings.append(API_TOKEN_ERROR)
+    token, token_error = load_api_token()
+    if token_error:
+        print(f"  [warn] {token_error}")
+        warnings.append(token_error)
+    if not token:
+        for w in warnings:
+            slack_alert(f":warning: *Granola sync warning:* {w}")
+        return
 
-    with open(CACHE_FILE) as f:
-        raw = json.load(f)
-    state = raw["cache"]["state"]
-    documents = state.get("documents", {})
-    transcripts = state.get("transcripts", {})
+    docs = call_api("get-documents", {}, token)
+    if not docs:
+        msg = "get-documents API call failed — no meetings archived"
+        print(f"  [error] {msg}")
+        slack_alert(f":x: *Granola sync error:* {msg}")
+        return
 
     synced = 0
     empty_notes = []
 
-    for doc_id, doc in documents.items():
-        if doc.get("deleted_at"):
+    for doc in docs:
+        if doc.get("deleted_at") or doc.get("is_scratchpad"):
             continue
 
         title = doc.get("title")
         if not title:
             continue
 
-        date_str = doc.get("created_at") or doc.get("updated_at")
-        doc_date = parse_date(date_str)
+        doc_date = parse_date(doc.get("created_at") or doc.get("updated_at"))
         if not doc_date or doc_date.date() < cutoff_date:
             continue
 
+        doc_id = doc["id"]
         folder_name = doc_date.strftime("%Y-%m-%d")
         slug = slugify(title)
         folder = ARCHIVE_DIR / folder_name
         folder.mkdir(parents=True, exist_ok=True)
 
-        # --- Notes ---
-        notes_doc = doc.get("notes")
-        ai_notes = prosemirror_to_markdown(notes_doc) if notes_doc and has_text_content(notes_doc) else ""
-        raw_notes = doc.get("notes_markdown") or ""
+        # --- Notes: try inline fields, then panels API ---
+        ai_notes = ""
 
-        if not ai_notes and not raw_notes.strip():
-            panels = call_api("get-document-panels", {"document_id": doc_id})
-            if panels:
+        notes_md = (doc.get("notes_markdown") or "").strip()
+        if notes_md:
+            ai_notes = notes_md
+        else:
+            notes_doc = doc.get("notes")
+            if notes_doc and has_text_content(notes_doc):
+                ai_notes = prosemirror_to_markdown(notes_doc)
+
+        if not ai_notes:
+            panels = call_api("get-document-panels", {"document_id": doc_id}, token)
+            if panels and isinstance(panels, list):
                 parts = []
                 for panel in panels:
                     panel_title = panel.get("title", "")
@@ -293,30 +358,27 @@ def main():
                         parts.append(f"## {panel_title}\n\n{md}" if panel_title else md)
                 ai_notes = "\n\n".join(parts)
 
-        if not ai_notes and not raw_notes.strip():
+        raw_notes = (doc.get("notes_plain") or "").strip()
+        if not ai_notes and not raw_notes:
             empty_notes.append(f"{folder_name}/{title}")
 
-        notes_content = f"# {title}\n\n"
-        notes_content += f"**Date:** {doc_date.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+        notes_content = f"# {title}\n\n**Date:** {doc_date.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
         if ai_notes:
             notes_content += ai_notes + "\n"
-        if raw_notes.strip():
+        if raw_notes and raw_notes != ai_notes:
             notes_content += f"\n## My Notes\n\n{raw_notes}\n"
-        if not ai_notes and not raw_notes.strip():
+        if not ai_notes and not raw_notes:
             notes_content += "_No notes available._\n"
 
         (folder / f"{slug}-notes.md").write_text(notes_content, encoding="utf-8")
 
         # --- Transcript ---
-        segments = transcripts.get(doc_id, [])
-        if not segments:
-            api_segs = call_api("get-document-transcript", {"document_id": doc_id})
-            if api_segs:
-                segments = api_segs
-
-        transcript_content = f"# {title} — Transcript\n\n"
-        transcript_content += f"**Date:** {doc_date.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
-        transcript_content += format_transcript(segments)
+        segments = call_api("get-document-transcript", {"document_id": doc_id}, token)
+        transcript_content = (
+            f"# {title} — Transcript\n\n"
+            f"**Date:** {doc_date.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+            + format_transcript(segments if isinstance(segments, list) else [])
+        )
         (folder / f"{slug}-transcript.md").write_text(transcript_content, encoding="utf-8")
 
         print(f"  Saved: {folder_name}/{slug}")
@@ -324,21 +386,19 @@ def main():
 
     print(f"\nDone. Synced {synced} meetings.")
 
-    # --- Health check ---
     if empty_notes:
-        msg = f":warning: *Granola sync:* {len(empty_notes)} meeting(s) saved with no notes (API may have changed or notes not yet generated):\n"
+        msg = f":warning: *Granola sync:* {len(empty_notes)} meeting(s) archived with no notes:\n"
         msg += "\n".join(f"  • {m}" for m in empty_notes)
         print(f"\n[alert] {msg}")
         slack_alert(msg)
 
     if warnings:
         for w in warnings:
-            msg = f":warning: *Granola sync warning:* {w}"
-            print(f"\n[alert] {msg}")
-            slack_alert(msg)
+            print(f"\n[alert] :warning: *Granola sync warning:* {w}")
+            slack_alert(f":warning: *Granola sync warning:* {w}")
 
     if synced == 0:
-        msg = ":warning: *Granola sync:* ran but found 0 meetings to archive — cache format may have changed"
+        msg = ":warning: *Granola sync:* ran but found 0 meetings to archive"
         print(f"\n[alert] {msg}")
         slack_alert(msg)
 
